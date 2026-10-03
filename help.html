@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>手機音訊插入靜音工具</title>
+  <!-- 載入 FFmpeg.wasm 庫 -->
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+  <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 500px;
+      margin: 0 auto;
+      padding: 20px;
+      background-color: #f5f5f7;
+      color: #333;
+    }
+    .card {
+      background: white;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    h2 { text-align: center; margin-top: 0; color: #007aff; }
+    .form-group { margin-bottom: 15px; }
+    label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 14px; }
+    input[type="file"], input[type="number"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      box-sizing: border-box;
+      font-size: 16px;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      background-color: #007aff;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+    button:disabled { background-color: #ccc; }
+    #status { margin-top: 15px; text-align: center; font-size: 14px; color: #666; }
+    #download-container { margin-top: 20px; text-align: center; }
+    .download-btn {
+      display: inline-block;
+      padding: 12px 24px;
+      background-color: #34c759;
+      color: white;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h2>🎵 音訊靜音插入器</h2>
+  
+  <div class="form-group">
+    <label for="audio-file">1. 選擇/上傳音訊檔案：</label>
+    <input type="file" id="audio-file" accept="audio/*" />
+  </div>
+
+  <div class="form-group">
+    <label for="insert-time">2. 在第幾秒插入靜音？ (秒)</label>
+    <input type="number" id="insert-time" value="10" min="0" step="0.1" />
+  </div>
+
+  <div class="form-group">
+    <label for="silence-duration">3. 要插入幾秒靜音？ (秒)</label>
+    <input type="number" id="silence-duration" value="5" min="0.1" step="0.1" />
+  </div>
+
+  <button id="process-btn" disabled>載入核心中...</button>
+
+  <div id="status">正在初始化 FFmpeg 核心...</div>
+  <div id="download-container"></div>
+</div>
+
+<script>
+  const { FFmpeg } = FFmpegWASM;
+  const { fetchFile, toBlobURL } = FFmpegUtil;
+
+  let ffmpeg = null;
+  const processBtn = document.getElementById('process-btn');
+  const statusDiv = document.getElementById('status');
+  const downloadContainer = document.getElementById('download-container');
+
+  // 初始化 FFmpeg
+  async function initFFmpeg() {
+    try {
+      ffmpeg = new FFmpeg();
+      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+      await ffmpeg.load({
+        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      });
+
+      statusDiv.innerText = 'FFmpeg 就緒，請選擇檔案並設定參數。';
+      processBtn.innerText = '開始處理';
+      processBtn.disabled = false;
+    } catch (err) {
+      statusDiv.innerText = 'FFmpeg 載入失敗：' + err.message;
+    }
+  }
+
+  // 點擊處理按鈕
+  processBtn.addEventListener('click', async () => {
+    const fileInput = document.getElementById('audio-file');
+    const insertTime = parseFloat(document.getElementById('insert-time').value);
+    const silenceDuration = parseFloat(document.getElementById('silence-duration').value);
+
+    if (!fileInput.files.length) {
+      alert('請先選擇音訊檔案！');
+      return;
+    }
+
+    const file = fileInput.files[0];
+    const delayMs = Math.round(silenceDuration * 1000);
+
+    processBtn.disabled = true;
+    statusDiv.innerText = '正在處理音訊，請稍候...';
+    downloadContainer.innerHTML = '';
+
+    try {
+      // 1. 寫入輸入檔
+      const ext = file.name.split('.').pop();
+      const inputName = `input.${ext}`;
+      const outputName = `output.${ext}`;
+      
+      await ffmpeg.writeFile(inputName, await fetchFile(file));
+
+      # 2. 組合 FFmpeg 濾鏡指令
+      const filterStr = `[0:a]atrim=end=${insertTime}[a1];[0:a]atrim=start=${insertTime},adelay=${delayMs}|${delayMs}[a2];[a1][a2]concat=n=2:v=0:a=1[out]`;
+
+      await ffmpeg.exec([
+        '-i', inputName,
+        '-filter_complex', filterStr,
+        '-map', '[out]',
+        outputName
+      ]);
+
+      // 3. 讀取結果檔案並產生下載按鈕
+      const data = await ffmpeg.readFile(outputName);
+      const blob = new Blob([data.buffer], { type: file.type || 'audio/mp3' });
+      const url = URL.createObjectURL(blob);
+
+      downloadContainer.innerHTML = `
+        <a class="download-btn" href="${url}" download="edited_${file.name}">下載處理後的音訊</a>
+      `;
+      statusDiv.innerText = '處理完成！請點擊上方按鈕下載。';
+
+    } catch (err) {
+      statusDiv.innerText = '處理過程發生錯誤：' + err.message;
+    } finally {
+      processBtn.disabled = false;
+    }
+  });
+
+  initFFmpeg();
+</script>
+
+</body>
+</html>
